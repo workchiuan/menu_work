@@ -1,668 +1,357 @@
-import React, { useState, useEffect } from 'react';
-import { Calendar, Clock, Store, ShoppingBag, FileText, Plus, Trash2, Download, Search } from 'lucide-react';
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+import uuid
+import io
+import json
+import os
 
-const GroupBuySystem = () => {
-  const [currentPage, setCurrentPage] = useState('create');
-  const [groups, setGroups] = useState([]);
-  const [currentMenu, setCurrentMenu] = useState([
-    { name: '範例:珍珠奶茶', price: 50 },
-    { name: '範例:招牌便當', price: 100 }
-  ]);
-  const [loading, setLoading] = useState(true);
+# 設定頁面配置
+st.set_page_config(page_title="多功能團購系統", layout="wide", page_icon="🍱")
 
-  // 載入資料
-  useEffect(() => {
-    loadData();
-  }, []);
+# 資料儲存檔案路徑
+DATA_FILE = "group_buy_data.json"
 
-  // 儲存資料
-  useEffect(() => {
-    if (!loading) {
-      saveData();
-    }
-  }, [groups]);
+# --- 資料持久化函式 ---
+def save_data():
+    """儲存資料到本地 JSON 檔案"""
+    try:
+        data = {
+            'groups': [],
+            'current_menu': st.session_state.current_menu_editor.to_dict('records')
+        }
+        
+        for group in st.session_state.groups:
+            group_copy = group.copy()
+            group_copy['deadline'] = group_copy['deadline'].isoformat()
+            group_copy['created_at'] = group_copy['created_at'].isoformat()
+            group_copy['menu'] = group_copy['menu'].to_dict('records')
+            # 圖片轉換為 base64 字串 (如果有的話)
+            if group_copy.get('menu_image_bytes'):
+                import base64
+                group_copy['menu_image_bytes'] = base64.b64encode(group_copy['menu_image_bytes']).decode('utf-8')
+            data['groups'].append(group_copy)
+        
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        st.error(f"儲存失敗: {e}")
+        return False
 
-  const loadData = async () => {
-    try {
-      const result = await window.storage.get('group_buy_groups', false);
-      if (result && result.value) {
-        const data = JSON.parse(result.value);
-        setGroups(data.map(g => ({
-          ...g,
-          deadline: new Date(g.deadline),
-          createdAt: new Date(g.createdAt)
-        })));
-      }
-    } catch (error) {
-      console.log('首次載入或無資料');
-    } finally {
-      setLoading(false);
-    }
-  };
+def load_data():
+    """從本地 JSON 檔案載入資料"""
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # 載入團購資料
+            st.session_state.groups = []
+            for group_data in data.get('groups', []):
+                group_data['deadline'] = datetime.fromisoformat(group_data['deadline'])
+                group_data['created_at'] = datetime.fromisoformat(group_data['created_at'])
+                group_data['menu'] = pd.DataFrame(group_data['menu'])
+                # 圖片從 base64 還原
+                if group_data.get('menu_image_bytes'):
+                    import base64
+                    group_data['menu_image_bytes'] = base64.b64decode(group_data['menu_image_bytes'])
+                st.session_state.groups.append(group_data)
+            
+            # 載入當前編輯的菜單
+            if data.get('current_menu'):
+                st.session_state.current_menu_editor = pd.DataFrame(data['current_menu'])
+            
+            return True
+    except Exception as e:
+        st.warning(f"載入資料時發生錯誤 (可能是首次使用): {e}")
+        return False
 
-  const saveData = async () => {
-    try {
-      const dataToSave = groups.map(g => ({
-        ...g,
-        deadline: g.deadline.toISOString(),
-        createdAt: g.createdAt.toISOString()
-      }));
-      await window.storage.set('group_buy_groups', JSON.stringify(dataToSave), false);
-    } catch (error) {
-      console.error('儲存失敗:', error);
-    }
-  };
+# --- 初始化 Session State ---
+if 'initialized' not in st.session_state:
+    st.session_state.initialized = True
+    st.session_state.current_menu_editor = pd.DataFrame({
+        "品名": ["範例:珍珠奶茶", "範例:招牌便當"],
+        "價格": [50, 100]
+    })
+    st.session_state.groups = []
+    # 程式啟動時載入資料
+    load_data()
 
-  const addMenuItem = () => {
-    setCurrentMenu([...currentMenu, { name: '', price: 0 }]);
-  };
+# --- 輔助函式 ---
+def get_group_options():
+    options = {}
+    for group in st.session_state.groups:
+        status = "🟢進行中" if group['deadline'] > datetime.now() else "🔴已截止"
+        label = f"{status} | {group['vendor_name']} ({group['category']})"
+        options[label] = group['id']
+    return options
 
-  const removeMenuItem = (index) => {
-    setCurrentMenu(currentMenu.filter((_, i) => i !== index));
-  };
+def get_group_by_id(group_id):
+    for group in st.session_state.groups:
+        if group['id'] == group_id:
+            return group
+    return None
 
-  const updateMenuItem = (index, field, value) => {
-    const newMenu = [...currentMenu];
-    newMenu[index][field] = field === 'price' ? Number(value) : value;
-    setCurrentMenu(newMenu);
-  };
+# --- 側邊欄 ---
+st.sidebar.title("🍱 團購導航")
+page = st.sidebar.radio("選擇功能", ["我要開團 (團主)", "我要點餐 (團員)", "訂單管理 (統計/結算)"])
 
-  const createGroup = (formData) => {
-    const newGroup = {
-      id: Date.now().toString(),
-      vendorName: formData.vendorName,
-      category: formData.category,
-      description: formData.description,
-      deadline: new Date(formData.deadline),
-      menu: currentMenu.filter(item => item.name && item.price),
-      orders: [],
-      createdAt: new Date()
-    };
-    setGroups([...groups, newGroup]);
-    setCurrentMenu([]);
-    alert(`✅ 成功開團!店家:${formData.vendorName}`);
-  };
+# 顯示當前資料狀態
+st.sidebar.divider()
+if st.session_state.groups:
+    st.sidebar.success(f"✅ 目前有 {len(st.session_state.groups)} 個團購")
+else:
+    st.sidebar.info("尚無團購資料")
 
-  const addOrder = (groupId, orderData) => {
-    setGroups(groups.map(g => {
-      if (g.id === groupId) {
-        return {
-          ...g,
-          orders: [...g.orders, {
-            ...orderData,
-            orderTime: new Date().toISOString()
-          }]
-        };
-      }
-      return g;
-    }));
-  };
+# ================= 頁面 1: 團主開團 =================
+if page == "我要開團 (團主)":
+    st.title("我是團主:發起新團購")
+    st.markdown("---")
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-orange-50 to-pink-50 flex items-center justify-center">
-        <div className="text-xl text-gray-600">載入中...</div>
-      </div>
-    );
-  }
+    col1, col2 = st.columns(2)
+    with col1:
+        vendor_name = st.text_input("店家名稱 (必填)", placeholder="例如:50嵐、八方雲集")
+        category = st.selectbox("團購分類", ["餐點", "飲料", "其他"])
+    with col2:
+        description = st.text_area("說明備註", placeholder="例如:這家很快,要在11點前送單,請大家配合。")
+        uploaded_image = st.file_uploader("上傳原始菜單圖片 (供點餐者參考)", type=["png", "jpg", "jpeg"], key="menu_image_uploader")
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-orange-50 to-pink-50">
-      {/* 導航欄 */}
-      <nav className="bg-white shadow-md">
-        <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold text-orange-600">🍱 多功能團購系統</h1>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setCurrentPage('create')}
-                className={`px-4 py-2 rounded-lg transition ${
-                  currentPage === 'create'
-                    ? 'bg-orange-500 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                我要開團
-              </button>
-              <button
-                onClick={() => setCurrentPage('order')}
-                className={`px-4 py-2 rounded-lg transition ${
-                  currentPage === 'order'
-                    ? 'bg-orange-500 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                我要點餐
-              </button>
-              <button
-                onClick={() => setCurrentPage('manage')}
-                className={`px-4 py-2 rounded-lg transition ${
-                  currentPage === 'manage'
-                    ? 'bg-orange-500 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                訂單管理
-              </button>
-            </div>
-          </div>
-        </div>
-      </nav>
+    st.subheader("設定收單時間")
+    c1, c2 = st.columns(2)
+    with c1:
+        d = st.date_input("收單日期", datetime.now())
+    with c2:
+        t = st.time_input("收單時間", datetime.now())
+    
+    deadline_dt = datetime.combine(d, t)
 
-      <div className="max-w-7xl mx-auto px-4 py-8">
-        {currentPage === 'create' && <CreateGroupPage currentMenu={currentMenu} setCurrentMenu={setCurrentMenu} addMenuItem={addMenuItem} removeMenuItem={removeMenuItem} updateMenuItem={updateMenuItem} createGroup={createGroup} />}
-        {currentPage === 'order' && <OrderPage groups={groups} addOrder={addOrder} />}
-        {currentPage === 'manage' && <ManagePage groups={groups} />}
-      </div>
-    </div>
-  );
-};
+    st.subheader("菜單設定 (手動輸入 或 Excel 匯入)")
+    
+    with st.expander("⬆️ 點此上傳 Excel 菜單 (上傳會覆蓋下方表格內容)", expanded=False):
+        uploaded_file = st.file_uploader("選擇菜單檔案", type=["xlsx", "xls"], key="excel_uploader")
+        
+        if uploaded_file is not None:
+            try:
+                df_import = pd.read_excel(uploaded_file)
+                if "品名" in df_import.columns and "價格" in df_import.columns:
+                    st.session_state.current_menu_editor = df_import[["品名", "價格"]].copy()
+                    st.success(f"讀取成功!共 {len(st.session_state.current_menu_editor)} 筆商品,已載入到下方表格。")
+                else:
+                    st.error("Excel 格式錯誤!找不到「品名」或「價格」欄位。")
+            except Exception as e:
+                st.error(f"檔案讀取失敗:{e}")
 
-// 開團頁面
-const CreateGroupPage = ({ currentMenu, setCurrentMenu, addMenuItem, removeMenuItem, updateMenuItem, createGroup }) => {
-  const [formData, setFormData] = useState({
-    vendorName: '',
-    category: '餐點',
-    description: '',
-    deadline: ''
-  });
+    st.info("您可以直接在下方表格新增、刪除或修改菜單內容。")
+    
+    edited_df = st.data_editor(
+        st.session_state.current_menu_editor, 
+        num_rows="dynamic",
+        use_container_width=True
+    )
+    st.session_state.current_menu_editor = edited_df
 
-  const handleSubmit = () => {
-    if (!formData.vendorName) {
-      alert('❌ 請輸入店家名稱!');
-      return;
-    }
-    if (currentMenu.filter(m => m.name && m.price).length === 0) {
-      alert('❌ 菜單為空!請輸入至少一個品項。');
-      return;
-    }
-    if (new Date(formData.deadline) <= new Date()) {
-      alert('⛔ 收單時間不能早於目前時間!');
-      return;
-    }
-    createGroup(formData);
-    setFormData({ vendorName: '', category: '餐點', description: '', deadline: '' });
-  };
+    st.markdown("---")
+    if st.button("🚀 確認發起團購", type="primary"):
+        final_menu_df = st.session_state.current_menu_editor.dropna(subset=['品名', '價格']).reset_index(drop=True)
+        
+        if not vendor_name:
+            st.error("❌ 請輸入店家名稱!")
+        elif final_menu_df.empty:
+            st.error("❌ 菜單為空!請輸入至少一個品項。")
+        elif deadline_dt <= datetime.now():
+            st.error(f"⛔ 收單時間 ({deadline_dt.strftime('%Y-%m-%d %H:%M')}) 不能早於目前時間!請重新設定。")
+        else:
+            image_bytes = uploaded_image.getvalue() if uploaded_image else None
+            
+            new_group = {
+                "id": str(uuid.uuid4()),
+                "vendor_name": vendor_name,
+                "category": category,
+                "description": description,
+                "deadline": deadline_dt,
+                "menu": final_menu_df,
+                "orders": [],
+                "created_at": datetime.now(),
+                "menu_image_bytes": image_bytes
+            }
+            st.session_state.groups.append(new_group)
+            
+            # 儲存資料
+            if save_data():
+                st.balloons()
+                st.success(f"✅ 成功開團!店家:{vendor_name},收單時間:{deadline_dt.strftime('%Y-%m-%d %H:%M')}")
+                st.info("💾 資料已自動儲存,重新整理也不會遺失!")
+                st.session_state.current_menu_editor = pd.DataFrame({"品名": [], "價格": []})
+            else:
+                st.warning("⚠️ 團購已建立,但儲存時發生問題")
 
-  return (
-    <div className="bg-white rounded-xl shadow-lg p-8">
-      <h2 className="text-3xl font-bold text-gray-800 mb-6">我是團主:發起新團購</h2>
-      
-      <div className="space-y-6">
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">店家名稱 (必填)</label>
-            <input
-              type="text"
-              value={formData.vendorName}
-              onChange={(e) => setFormData({...formData, vendorName: e.target.value})}
-              placeholder="例如:50嵐、八方雲集"
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">團購分類</label>
-            <select
-              value={formData.category}
-              onChange={(e) => setFormData({...formData, category: e.target.value})}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-            >
-              <option>餐點</option>
-              <option>飲料</option>
-              <option>其他</option>
-            </select>
-          </div>
-        </div>
+# ================= 頁面 2: 團員點餐 =================
+elif page == "我要點餐 (團員)":
+    st.title("👋 我要點餐")
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">說明備註</label>
-          <textarea
-            value={formData.description}
-            onChange={(e) => setFormData({...formData, description: e.target.value})}
-            placeholder="例如:這家很快,要在11點前送單,請大家配合。"
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-            rows="3"
-          />
-        </div>
+    group_options = get_group_options()
+    
+    if not group_options:
+        st.warning("目前沒有任何團購活動。")
+    else:
+        selected_label = st.selectbox("請選擇要參加的團購", list(group_options.keys()))
+        selected_group_id = group_options[selected_label]
+        group = get_group_by_id(selected_group_id)
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">收單時間</label>
-          <input
-            type="datetime-local"
-            value={formData.deadline}
-            onChange={(e) => setFormData({...formData, deadline: e.target.value})}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-          />
-        </div>
+        if group:
+            st.markdown(f"### 🏪 {group['vendor_name']}")
+            st.caption(f"📅 截止時間:{group['deadline'].strftime('%Y-%m-%d %H:%M')} | 類別:{group['category']}")
+            if group['description']:
+                st.info(f"📢 團主備註:{group['description']}")
 
-        <div className="border-t pt-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-xl font-semibold text-gray-800">菜單設定</h3>
-            <button
-              onClick={addMenuItem}
-              className="flex items-center gap-2 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition"
-            >
-              <Plus size={20} />
-              新增品項
-            </button>
-          </div>
+            if group.get('menu_image_bytes'):
+                with st.expander("🖼️ 點此查看原始菜單圖片 (參考用)", expanded=False):
+                    image_buffer = io.BytesIO(group['menu_image_bytes'])
+                    st.image(image_buffer, caption=f"{group['vendor_name']} 原始菜單", use_column_width='auto')
 
-          <div className="space-y-3">
-            {currentMenu.map((item, index) => (
-              <div key={index} className="flex gap-3 items-center">
-                <input
-                  type="text"
-                  value={item.name}
-                  onChange={(e) => updateMenuItem(index, 'name', e.target.value)}
-                  placeholder="品名"
-                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                />
-                <input
-                  type="number"
-                  value={item.price}
-                  onChange={(e) => updateMenuItem(index, 'price', e.target.value)}
-                  placeholder="價格"
-                  className="w-32 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                />
-                <button
-                  onClick={() => removeMenuItem(index)}
-                  className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition"
-                >
-                  <Trash2 size={20} />
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
+            time_left = group['deadline'] - datetime.now()
+            if time_left.total_seconds() <= 0:
+                st.error("⛔ 這團已經截止收單囉!")
+            else:
+                time_str = str(time_left).split('.')[0]
+                st.success(f"🟢 開放點餐中 (剩餘 {time_str})")
 
-        <button
-          onClick={handleSubmit}
-          className="w-full bg-orange-500 text-white py-3 rounded-lg font-semibold hover:bg-orange-600 transition flex items-center justify-center gap-2"
-        >
-          🚀 確認發起團購
-        </button>
-      </div>
-    </div>
-  );
-};
+                with st.form(key=f"form_{group['id']}"):
+                    # 使用者姓名
+                    user_name = st.text_input("您的姓名 (必填)")
+                    
+                    # 餐點選擇 - 加上搜尋功能
+                    st.markdown("**選擇餐點**")
+                    search_term = st.text_input("🔍 搜尋餐點 (輸入關鍵字)", key=f"search_{group['id']}")
+                    
+                    # 根據搜尋過濾菜單
+                    filtered_menu = group['menu']
+                    if search_term:
+                        filtered_menu = group['menu'][group['menu']['品名'].str.contains(search_term, case=False, na=False)]
+                    
+                    menu_options = [f"{row['品名']} (${row['價格']})" for index, row in filtered_menu.iterrows()]
+                    
+                    if not menu_options:
+                        st.warning("找不到符合的餐點")
+                        selected_item_str = None
+                    else:
+                        selected_item_str = st.selectbox(
+                            "請選擇餐點", 
+                            ["(請選擇)"] + menu_options,
+                            key=f"menu_select_{group['id']}"
+                        )
+                        if selected_item_str == "(請選擇)":
+                            selected_item_str = None
 
-// 點餐頁面
-const OrderPage = ({ groups, addOrder }) => {
-  const [selectedGroupId, setSelectedGroupId] = useState('');
-  const [orderForm, setOrderForm] = useState({
-    userName: '',
-    selectedItem: '',
-    quantity: 1,
-    sugar: '(請選擇)',
-    ice: '(請選擇)',
-    note: ''
-  });
-  const [searchTerm, setSearchTerm] = useState('');
+                    # 飲料客製化選項
+                    sugar_choice = "(請選擇)"
+                    ice_choice = "(請選擇)"
+                    
+                    if group['category'] == "飲料":
+                        st.markdown("**🍹 飲料客製化選項 (必填)**")
+                        c_bev1, c_bev2 = st.columns(2)
+                        with c_bev1:
+                            sugar_opts = ["(請選擇)", "正常糖", "少糖 (7分)", "半糖 (5分)", "微糖 (3分)", "一分糖", "無糖"]
+                            sugar_choice = st.selectbox("甜度", sugar_opts, key=f"sugar_{group['id']}")
+                        with c_bev2:
+                            ice_opts = ["(請選擇)", "正常冰", "少冰", "微冰", "去冰", "完全去冰", "溫", "熱"]
+                            ice_choice = st.selectbox("冰塊", ice_opts, key=f"ice_{group['id']}")
 
-  const activeGroups = groups.filter(g => g.deadline > new Date());
-  const selectedGroup = groups.find(g => g.id === selectedGroupId);
+                    # 數量和備註
+                    col_q1, col_q2 = st.columns(2)
+                    with col_q1:
+                        quantity = st.number_input("數量", min_value=1, value=1, key=f"qty_{group['id']}")
+                    with col_q2:
+                        note = st.text_input("其他備註 (例如:加珍珠)", key=f"note_{group['id']}")
 
-  const filteredMenu = selectedGroup?.menu.filter(item => 
-    item.name.toLowerCase().includes(searchTerm.toLowerCase())
-  ) || [];
+                    submit = st.form_submit_button("送出訂單")
 
-  const handleSubmit = () => {
-    if (!orderForm.userName) {
-      alert('❌ 請輸入姓名!');
-      return;
-    }
-    if (!orderForm.selectedItem) {
-      alert('❌ 請選擇一項餐點!');
-      return;
-    }
-    if (selectedGroup?.category === '飲料' && (orderForm.sugar === '(請選擇)' || orderForm.ice === '(請選擇)')) {
-      alert('❌ 飲料類別請務必選擇「甜度」與「冰塊」!');
-      return;
-    }
+                    if submit:
+                        if not user_name:
+                            st.error("❌ 請輸入姓名!")
+                        elif not selected_item_str:
+                            st.error("❌ 請選擇一項餐點!")
+                        elif group['category'] == "飲料" and (sugar_choice == "(請選擇)" or ice_choice == "(請選擇)"):
+                            st.error("❌ 飲料類別請務必選擇「甜度」與「冰塊」!")
+                        else:
+                            try:
+                                item_name = selected_item_str.rsplit(" ($", 1)[0]
+                                item_price = int(selected_item_str.rsplit(" ($", 1)[1].replace(")", ""))
+                                
+                                final_note = note
+                                if group['category'] == "飲料":
+                                    bev_note = f"{sugar_choice}/{ice_choice}"
+                                    final_note = f"{bev_note}, {note}" if note else bev_note
 
-    const menuItem = selectedGroup.menu.find(m => m.name === orderForm.selectedItem);
-    let finalNote = orderForm.note;
-    if (selectedGroup?.category === '飲料') {
-      const bevNote = `${orderForm.sugar}/${orderForm.ice}`;
-      finalNote = orderForm.note ? `${bevNote}, ${orderForm.note}` : bevNote;
-    }
+                                order_entry = {
+                                    "姓名": user_name,
+                                    "品項": item_name,
+                                    "單價": item_price,
+                                    "數量": quantity,
+                                    "總價": item_price * quantity,
+                                    "備註": final_note,
+                                    "下單時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                }
+                                
+                                group['orders'].append(order_entry)
+                                
+                                # 儲存資料
+                                if save_data():
+                                    st.success(f"✅ {user_name},您的「{item_name}」已訂購成功!")
+                                    st.info("💾 訂單已自動儲存")
+                                else:
+                                    st.warning("⚠️ 訂單已加入,但儲存時發生問題")
+                            except Exception as e:
+                                st.error(f"系統錯誤:{e}")
 
-    addOrder(selectedGroupId, {
-      userName: orderForm.userName,
-      itemName: menuItem.name,
-      unitPrice: menuItem.price,
-      quantity: orderForm.quantity,
-      totalPrice: menuItem.price * orderForm.quantity,
-      note: finalNote
-    });
+# ================= 頁面 3: 訂單管理 =================
+elif page == "訂單管理 (統計/結算)":
+    st.title("📊 訂單管理與統計")
 
-    alert(`✅ ${orderForm.userName},您的「${menuItem.name}」已訂購成功!`);
-    setOrderForm({
-      userName: '',
-      selectedItem: '',
-      quantity: 1,
-      sugar: '(請選擇)',
-      ice: '(請選擇)',
-      note: ''
-    });
-    setSearchTerm('');
-  };
+    group_options = get_group_options()
+    if not group_options:
+        st.info("目前沒有資料。")
+    else:
+        st.markdown("### 選擇要檢視的團購")
+        selected_label_admin = st.selectbox("選擇團購", list(group_options.keys()), key="admin_select")
+        selected_group_id_admin = group_options[selected_label_admin]
+        group = get_group_by_id(selected_group_id_admin)
 
-  if (activeGroups.length === 0) {
-    return (
-      <div className="bg-white rounded-xl shadow-lg p-8 text-center">
-        <p className="text-gray-600 text-lg">目前沒有任何進行中的團購活動</p>
-      </div>
-    );
-  }
+        if group:
+            st.divider()
+            st.subheader(f"店家:{group['vendor_name']}")
+            
+            if not group['orders']:
+                st.warning("尚無訂單。")
+            else:
+                df_orders = pd.DataFrame(group['orders'])
 
-  return (
-    <div className="bg-white rounded-xl shadow-lg p-8">
-      <h2 className="text-3xl font-bold text-gray-800 mb-6">👋 我要點餐</h2>
+                with st.expander("展開詳細訂單列表", expanded=True):
+                    st.dataframe(df_orders, use_container_width=True)
 
-      <div className="mb-6">
-        <label className="block text-sm font-medium text-gray-700 mb-2">請選擇要參加的團購</label>
-        <select
-          value={selectedGroupId}
-          onChange={(e) => {
-            setSelectedGroupId(e.target.value);
-            setOrderForm({...orderForm, selectedItem: ''});
-            setSearchTerm('');
-          }}
-          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-        >
-          <option value="">請選擇...</option>
-          {activeGroups.map(group => {
-            const timeLeft = group.deadline - new Date();
-            const hoursLeft = Math.floor(timeLeft / (1000 * 60 * 60));
-            return (
-              <option key={group.id} value={group.id}>
-                🟢 {group.vendorName} ({group.category}) - 剩餘 {hoursLeft} 小時
-              </option>
-            );
-          })}
-        </select>
-      </div>
+                total_money = df_orders["總價"].sum()
+                total_qty = df_orders["數量"].sum()
+                st.metric("本團總金額", f"${total_money}", delta=f"共 {total_qty} 份餐點")
 
-      {selectedGroup && (
-        <div>
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
-            <h3 className="font-semibold text-lg mb-2">🏪 {selectedGroup.vendorName}</h3>
-            <p className="text-sm text-gray-600">📅 截止時間: {selectedGroup.deadline.toLocaleString('zh-TW')}</p>
-            {selectedGroup.description && (
-              <p className="text-sm text-gray-700 mt-2">📢 團主備註: {selectedGroup.description}</p>
-            )}
-          </div>
+                st.subheader("📝 廠商叫貨單 (合併相同品項與需求)")
+                summary = df_orders.groupby(["品項", "備註"])["數量"].sum().reset_index()
+                st.dataframe(summary, use_container_width=True)
 
-          <div className="space-y-6">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">您的姓名 (必填)</label>
-              <input
-                type="text"
-                value={orderForm.userName}
-                onChange={(e) => setOrderForm({...orderForm, userName: e.target.value})}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-              />
-            </div>
+                csv = df_orders.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(
+                    label=f"📥 下載 [{group['vendor_name']}] 訂單 CSV",
+                    data=csv,
+                    file_name=f"orders_{group['vendor_name']}.csv",
+                    mime='text/csv',
+                )
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">選擇餐點 (可輸入關鍵字搜尋)</label>
-              <div className="relative mb-2">
-                <Search className="absolute left-3 top-3 text-gray-400" size={20} />
-                <input
-                  type="text"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="搜尋餐點..."
-                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                />
-              </div>
-              <select
-                value={orderForm.selectedItem}
-                onChange={(e) => setOrderForm({...orderForm, selectedItem: e.target.value})}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-              >
-                <option value="">請選擇餐點</option>
-                {filteredMenu.map((item, idx) => (
-                  <option key={idx} value={item.name}>
-                    {item.name} (${item.price})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {selectedGroup.category === '飲料' && (
-              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                <h4 className="font-semibold mb-3">🍹 飲料客製化選項 (必填)</h4>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">甜度</label>
-                    <select
-                      value={orderForm.sugar}
-                      onChange={(e) => setOrderForm({...orderForm, sugar: e.target.value})}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                    >
-                      <option>(請選擇)</option>
-                      <option>正常糖</option>
-                      <option>少糖 (7分)</option>
-                      <option>半糖 (5分)</option>
-                      <option>微糖 (3分)</option>
-                      <option>一分糖</option>
-                      <option>無糖</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">冰塊</label>
-                    <select
-                      value={orderForm.ice}
-                      onChange={(e) => setOrderForm({...orderForm, ice: e.target.value})}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                    >
-                      <option>(請選擇)</option>
-                      <option>正常冰</option>
-                      <option>少冰</option>
-                      <option>微冰</option>
-                      <option>去冰</option>
-                      <option>完全去冰</option>
-                      <option>溫</option>
-                      <option>熱</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">數量</label>
-                <input
-                  type="number"
-                  min="1"
-                  value={orderForm.quantity}
-                  onChange={(e) => setOrderForm({...orderForm, quantity: parseInt(e.target.value) || 1})}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">其他備註</label>
-                <input
-                  type="text"
-                  value={orderForm.note}
-                  onChange={(e) => setOrderForm({...orderForm, note: e.target.value})}
-                  placeholder="例如:加珍珠"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                />
-              </div>
-            </div>
-
-            <button
-              onClick={handleSubmit}
-              className="w-full bg-orange-500 text-white py-3 rounded-lg font-semibold hover:bg-orange-600 transition"
-            >
-              送出訂單
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
-// 訂單管理頁面
-const ManagePage = ({ groups }) => {
-  const [selectedGroupId, setSelectedGroupId] = useState('');
-  const selectedGroup = groups.find(g => g.id === selectedGroupId);
-
-  if (groups.length === 0) {
-    return (
-      <div className="bg-white rounded-xl shadow-lg p-8 text-center">
-        <p className="text-gray-600 text-lg">目前沒有資料</p>
-      </div>
-    );
-  }
-
-  const downloadCSV = () => {
-    if (!selectedGroup || selectedGroup.orders.length === 0) return;
-
-    const headers = ['姓名', '品項', '單價', '數量', '總價', '備註', '下單時間'];
-    const rows = selectedGroup.orders.map(order => [
-      order.userName,
-      order.itemName,
-      order.unitPrice,
-      order.quantity,
-      order.totalPrice,
-      order.note,
-      order.orderTime
-    ]);
-
-    const csv = [
-      headers.join(','),
-      ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
-    ].join('\n');
-
-    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `orders_${selectedGroup.vendorName}.csv`;
-    link.click();
-  };
-
-  const summary = selectedGroup?.orders.reduce((acc, order) => {
-    const key = `${order.itemName}|${order.note}`;
-    if (!acc[key]) {
-      acc[key] = { itemName: order.itemName, note: order.note, quantity: 0 };
-    }
-    acc[key].quantity += order.quantity;
-    return acc;
-  }, {});
-
-  return (
-    <div className="bg-white rounded-xl shadow-lg p-8">
-      <h2 className="text-3xl font-bold text-gray-800 mb-6">📊 訂單管理與統計</h2>
-
-      <div className="mb-6">
-        <label className="block text-sm font-medium text-gray-700 mb-2">選擇要檢視的團購</label>
-        <select
-          value={selectedGroupId}
-          onChange={(e) => setSelectedGroupId(e.target.value)}
-          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-        >
-          <option value="">請選擇...</option>
-          {groups.map(group => {
-            const status = group.deadline > new Date() ? '🟢進行中' : '🔴已截止';
-            return (
-              <option key={group.id} value={group.id}>
-                {status} | {group.vendorName} ({group.category})
-              </option>
-            );
-          })}
-        </select>
-      </div>
-
-      {selectedGroup && (
-        <div>
-          <h3 className="text-2xl font-semibold mb-4">店家: {selectedGroup.vendorName}</h3>
-          
-          {selectedGroup.orders.length === 0 ? (
-            <p className="text-gray-600">尚無訂單</p>
-          ) : (
-            <div className="space-y-6">
-              <div className="bg-green-50 border border-green-200 rounded-lg p-6">
-                <div className="text-3xl font-bold text-green-700">
-                  ${selectedGroup.orders.reduce((sum, o) => sum + o.totalPrice, 0)}
-                </div>
-                <div className="text-sm text-gray-600 mt-1">
-                  共 {selectedGroup.orders.reduce((sum, o) => sum + o.quantity, 0)} 份餐點
-                </div>
-              </div>
-
-              <div>
-                <h4 className="text-xl font-semibold mb-3">詳細訂單列表</h4>
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse">
-                    <thead>
-                      <tr className="bg-gray-100">
-                        <th className="border px-4 py-2 text-left">姓名</th>
-                        <th className="border px-4 py-2 text-left">品項</th>
-                        <th className="border px-4 py-2 text-right">單價</th>
-                        <th className="border px-4 py-2 text-right">數量</th>
-                        <th className="border px-4 py-2 text-right">總價</th>
-                        <th className="border px-4 py-2 text-left">備註</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {selectedGroup.orders.map((order, idx) => (
-                        <tr key={idx} className="hover:bg-gray-50">
-                          <td className="border px-4 py-2">{order.userName}</td>
-                          <td className="border px-4 py-2">{order.itemName}</td>
-                          <td className="border px-4 py-2 text-right">${order.unitPrice}</td>
-                          <td className="border px-4 py-2 text-right">{order.quantity}</td>
-                          <td className="border px-4 py-2 text-right">${order.totalPrice}</td>
-                          <td className="border px-4 py-2">{order.note}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div>
-                <h4 className="text-xl font-semibold mb-3">📝 廠商叫貨單 (合併相同品項與需求)</h4>
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse">
-                    <thead>
-                      <tr className="bg-gray-100">
-                        <th className="border px-4 py-2 text-left">品項</th>
-                        <th className="border px-4 py-2 text-left">備註</th>
-                        <th className="border px-4 py-2 text-right">數量</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Object.values(summary).map((item, idx) => (
-                        <tr key={idx} className="hover:bg-gray-50">
-                          <td className="border px-4 py-2">{item.itemName}</td>
-                          <td className="border px-4 py-2">{item.note}</td>
-                          <td className="border px-4 py-2 text-right">{item.quantity}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <button
-                onClick={downloadCSV}
-                className="flex items-center gap-2 px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition"
-              >
-                <Download size={20} />
-                下載 [{selectedGroup.vendorName}] 訂單 CSV
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
-
-export default GroupBuySystem;
+# 顯示儲存狀態 (開發用,可刪除)
+with st.sidebar.expander("🔧 系統資訊", expanded=False):
+    if os.path.exists(DATA_FILE):
+        file_size = os.path.getsize(DATA_FILE)
+        st.caption(f"資料檔案: {DATA_FILE}")
+        st.caption(f"檔案大小: {file_size} bytes")
+        st.caption(f"最後修改: {datetime.fromtimestamp(os.path.getmtime(DATA_FILE)).strftime('%Y-%m-%d %H:%M:%S')}")
+    else:
+        st.caption("尚未建立資料檔案")
