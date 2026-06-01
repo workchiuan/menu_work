@@ -586,7 +586,9 @@ elif page == "我要點餐 (團員)":
                     image_buffer = io.BytesIO(group['menu_image_bytes'])
                     st.image(image_buffer, caption=f"{group['vendor_name']} 原始菜單", use_container_width=True)
 
-            time_left = group['deadline'] - datetime.now()
+            deadline = group['deadline']
+            now = datetime.now(deadline.tzinfo) if deadline.tzinfo is not None else datetime.now()
+            time_left = deadline - now
             if time_left.total_seconds() <= 0:
                 st.error("⛔ 這團已經截止收單囉！")
             else:
