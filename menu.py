@@ -23,7 +23,10 @@ def create_empty_menu_df():
 
 
 def is_group_active(group):
-    return group['deadline'] > datetime.now()
+    deadline = group['deadline']
+    if deadline.tzinfo is not None:
+        return deadline > datetime.now(deadline.tzinfo)
+    return deadline > datetime.now()
 
 
 def normalize_text(value):
