@@ -3,16 +3,17 @@ import pandas as pd
 from datetime import datetime
 import uuid
 import io
-import json
-import os
 import re
 import base64
+from db import (
+    db_save_vendor, db_load_vendors, db_delete_vendor,
+    db_save_group, db_load_groups,
+    db_save_order,
+)
 
 # 設定頁面配置
 st.set_page_config(page_title="多功能團購系統", layout="wide", page_icon="🍱")
 
-# 資料儲存檔案路徑
-DATA_FILE = "group_buy_data.json"
 MENU_COLUMNS = ["品名", "價格"]
 CATEGORY_OPTIONS = ["餐點", "飲料", "其他"]
 
@@ -102,81 +103,48 @@ def vendor_matches_query(vendor, query):
     haystack = " ".join(normalize_text(part) for part in haystack_parts).casefold()
     return all(keyword in haystack for keyword in keywords)
 
-# --- 資料持久化函式 ---
-def save_data():
-    """儲存資料到本地 JSON 檔案"""
-    try:
-        data = {
-            'vendors': [],
-            'groups': [],
-            'current_menu': sanitize_menu_dataframe(
-                st.session_state.current_menu_editor
-            ).to_dict('records')
-        }
+# --- 資料持久化函式（Supabase 雲端） ---
+def save_vendor_to_cloud(vendor):
+    """儲存單一店家到雲端資料庫"""
+    return db_save_vendor(vendor)
 
-        # 儲存店家資料
-        for vendor in st.session_state.vendors:
-            v_copy = vendor.copy()
-            v_copy['menu'] = sanitize_menu_dataframe(v_copy['menu']).to_dict('records')
-            if v_copy.get('menu_image_bytes'):
-                v_copy['menu_image_bytes'] = base64.b64encode(v_copy['menu_image_bytes']).decode('utf-8')
-            data['vendors'].append(v_copy)
 
-        for group in st.session_state.groups:
-            group_copy = group.copy()
-            group_copy['deadline'] = group_copy['deadline'].isoformat()
-            group_copy['created_at'] = group_copy['created_at'].isoformat()
-            group_copy['menu'] = sanitize_menu_dataframe(group_copy['menu']).to_dict('records')
-            if group_copy.get('menu_image_bytes'):
-                group_copy['menu_image_bytes'] = base64.b64encode(group_copy['menu_image_bytes']).decode('utf-8')
-            data['groups'].append(group_copy)
+def save_group_to_cloud(group):
+    """儲存單一團購到雲端資料庫"""
+    return db_save_group(group)
 
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception as e:
-        st.error(f"儲存失敗: {e}")
-        return False
+
+def save_order_to_cloud(group_id, order):
+    """儲存單一訂單到雲端資料庫"""
+    return db_save_order(group_id, order)
+
 
 def load_data():
-    """從本地 JSON 檔案載入資料"""
+    """從 Supabase 雲端資料庫載入所有資料"""
     try:
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+        # 載入店家
+        vendors_raw = db_load_vendors()
+        st.session_state.vendors = []
+        for v in vendors_raw:
+            v['vendor_name'] = normalize_text(v.get('vendor_name'))
+            v['category'] = normalize_text(v.get('category')) or CATEGORY_OPTIONS[0]
+            v['description'] = normalize_text(v.get('description'))
+            v['menu'] = sanitize_menu_dataframe(v.get('menu', []))
+            st.session_state.vendors.append(v)
 
-            # 載入店家資料
-            st.session_state.vendors = []
-            for v in data.get('vendors', []):
-                v['vendor_name'] = normalize_text(v.get('vendor_name'))
-                v['category'] = normalize_text(v.get('category')) or CATEGORY_OPTIONS[0]
-                v['description'] = normalize_text(v.get('description'))
-                v['menu'] = sanitize_menu_dataframe(v.get('menu', []))
-                if v.get('menu_image_bytes'):
-                    v['menu_image_bytes'] = base64.b64decode(v['menu_image_bytes'])
-                st.session_state.vendors.append(v)
+        # 載入團購（含訂單）
+        groups_raw = db_load_groups()
+        st.session_state.groups = []
+        for g in groups_raw:
+            g['vendor_name'] = normalize_text(g.get('vendor_name'))
+            g['category'] = normalize_text(g.get('category')) or CATEGORY_OPTIONS[0]
+            g['description'] = normalize_text(g.get('description'))
+            g['menu'] = sanitize_menu_dataframe(g.get('menu', []))
+            st.session_state.groups.append(g)
 
-            # 載入團購資料
-            st.session_state.groups = []
-            for group_data in data.get('groups', []):
-                group_data['deadline'] = datetime.fromisoformat(group_data['deadline'])
-                group_data['created_at'] = datetime.fromisoformat(group_data['created_at'])
-                group_data['vendor_name'] = normalize_text(group_data.get('vendor_name'))
-                group_data['category'] = normalize_text(group_data.get('category')) or CATEGORY_OPTIONS[0]
-                group_data['description'] = normalize_text(group_data.get('description'))
-                group_data['menu'] = sanitize_menu_dataframe(group_data.get('menu', []))
-                group_data['orders'] = group_data.get('orders', [])
-                if group_data.get('menu_image_bytes'):
-                    group_data['menu_image_bytes'] = base64.b64decode(group_data['menu_image_bytes'])
-                st.session_state.groups.append(group_data)
-
-            # 載入當前編輯的菜單
-            if 'current_menu' in data:
-                st.session_state.current_menu_editor = sanitize_menu_dataframe(data.get('current_menu', []))
-
-            return True
+        return True
     except Exception as e:
-        st.warning(f"載入資料時發生錯誤 (可能是首次使用): {e}")
+        st.warning(f"載入雲端資料時發生錯誤: {e}")
         return False
 
 # --- 初始化 Session State ---
@@ -324,12 +292,12 @@ if page == "店家管理":
                     "menu_image_bytes": image_bytes,
                 }
                 st.session_state.vendors.append(new_vendor)
-                if save_data():
-                    st.success(f"✅ 店家「{normalized_name}」已儲存！")
+                if save_vendor_to_cloud(new_vendor):
+                    st.success(f"✅ 店家「{normalized_name}」已儲存到雲端！")
                     st.session_state.current_menu_editor = create_empty_menu_df()
                     st.rerun()
                 else:
-                    st.warning("⚠️ 店家已新增，但儲存時發生問題")
+                    st.warning("⚠️ 店家已新增到本地，但雲端儲存時發生問題")
 
     st.markdown("---")
     st.subheader("📋 已儲存的店家")
@@ -356,7 +324,7 @@ if page == "店家管理":
                 st.caption(f"說明：{vendor['description'] or '（無）'}")
                 st.dataframe(vendor['menu'], use_container_width=True)
                 if vendor.get('menu_image_bytes'):
-                    st.image(io.BytesIO(vendor['menu_image_bytes']), caption="菜單圖片", use_column_width='auto')
+                    st.image(io.BytesIO(vendor['menu_image_bytes']), caption="菜單圖片", use_container_width=True)
                 btn_c1, btn_c2 = st.columns(2)
                 with btn_c1:
                     if st.button(f"🚀 直接開團", key=f"quick_group_{vendor['id']}"):
@@ -366,7 +334,7 @@ if page == "店家管理":
                 with btn_c2:
                     if st.button(f"🗑️ 刪除", key=f"del_vendor_{vendor['id']}"):
                         st.session_state.vendors.pop(i)
-                        save_data()
+                        db_delete_vendor(vendor['id'])
                         st.rerun()
 
 # ================= 頁面 1: 團主開團 =================
@@ -389,16 +357,17 @@ elif page == "我要開團 (團主)":
                 if find_vendor_by_name(ask['name']):
                     st.info("ℹ️ 店家清單中已存在同名店家，已略過儲存。")
                 else:
-                    st.session_state.vendors.append({
+                    new_v = {
                         "id": str(uuid.uuid4()),
                         "vendor_name": normalize_text(ask['name']),
                         "category": ask['category'],
                         "description": normalize_text(ask['description']),
                         "menu": sanitize_menu_dataframe(ask['menu']),
                         "menu_image_bytes": ask['image_bytes'],
-                    })
-                    save_data()
-                    st.success("✅ 店家已儲存！")
+                    }
+                    st.session_state.vendors.append(new_v)
+                    save_vendor_to_cloud(new_v)
+                    st.success("✅ 店家已儲存到雲端！")
                 st.rerun()
         with cn:
             if st.button("❌ 不用，謝謝", key="skip_save_vendor"):
@@ -434,8 +403,8 @@ elif page == "我要開團 (團主)":
                             v['description'] = normalize_text(ask['description'])
                             v['menu'] = sanitize_menu_dataframe(ask['menu'])
                             v['menu_image_bytes'] = ask['image_bytes']
+                            save_vendor_to_cloud(v)
                             break
-                    save_data()
                     st.session_state.pop('_ask_update_vendor')
                     st.success("✅ 店家資料已更新！")
                     st.rerun()
@@ -470,7 +439,7 @@ elif page == "我要開團 (團主)":
         existing_group_image = st.session_state.get('_grp_menu_image_bytes')
         if existing_group_image and uploaded_image is None:
             st.caption("目前沿用已儲存店家的菜單圖片。")
-            st.image(io.BytesIO(existing_group_image), caption="目前使用中的菜單圖片", use_column_width='auto')
+            st.image(io.BytesIO(existing_group_image), caption="目前使用中的菜單圖片", use_container_width=True)
 
     st.subheader("設定收單時間")
     c1, c2 = st.columns(2)
@@ -542,7 +511,7 @@ elif page == "我要開團 (團主)":
                 "menu_image_bytes": image_bytes,
             }
             st.session_state.groups.append(new_group)
-            save_data()
+            save_group_to_cloud(new_group)
 
             loaded_vid = st.session_state.get('_grp_loaded_vendor_id')
             deadline_str = deadline_dt.strftime('%Y-%m-%d %H:%M')
@@ -612,7 +581,7 @@ elif page == "我要點餐 (團員)":
             if group.get('menu_image_bytes'):
                 with st.expander("🖼️ 點此查看原始菜單圖片 (參考用)", expanded=False):
                     image_buffer = io.BytesIO(group['menu_image_bytes'])
-                    st.image(image_buffer, caption=f"{group['vendor_name']} 原始菜單", use_column_width='auto')
+                    st.image(image_buffer, caption=f"{group['vendor_name']} 原始菜單", use_container_width=True)
 
             time_left = group['deadline'] - datetime.now()
             if time_left.total_seconds() <= 0:
@@ -689,11 +658,11 @@ elif page == "我要點餐 (團員)":
 
                                 group['orders'].append(order_entry)
 
-                                if save_data():
+                                if save_order_to_cloud(group['id'], order_entry):
                                     st.success(f"✅ {user_name}，您的「{item_name}」已訂購成功！")
-                                    st.info("💾 訂單已自動儲存")
+                                    st.info("💾 訂單已儲存到雲端資料庫")
                                 else:
-                                    st.warning("⚠️ 訂單已加入，但儲存時發生問題")
+                                    st.warning("⚠️ 訂單已加入本地，但雲端儲存時發生問題")
                             except Exception as e:
                                 st.error(f"系統錯誤：{e}")
 
@@ -740,10 +709,11 @@ elif page == "訂單管理 (統計/結算)":
 
 # --- 側邊欄：系統資訊 ---
 with st.sidebar.expander("🔧 系統資訊", expanded=False):
-    if os.path.exists(DATA_FILE):
-        file_size = os.path.getsize(DATA_FILE)
-        st.caption(f"資料檔案: {DATA_FILE}")
-        st.caption(f"檔案大小: {file_size} bytes")
-        st.caption(f"最後修改: {datetime.fromtimestamp(os.path.getmtime(DATA_FILE)).strftime('%Y-%m-%d %H:%M:%S')}")
-    else:
-        st.caption("尚未建立資料檔案")
+    st.caption("☁️ 資料儲存方式：Supabase 雲端 PostgreSQL")
+    st.caption(f"🏪 店家數量：{len(st.session_state.vendors)} 間")
+    st.caption(f"📦 團購數量：{len(st.session_state.groups)} 個")
+    total_orders = sum(len(g.get('orders', [])) for g in st.session_state.groups)
+    st.caption(f"📝 總訂單數：{total_orders} 筆")
+    if st.button("🔄 重新載入雲端資料", key="reload_cloud"):
+        load_data()
+        st.rerun()
