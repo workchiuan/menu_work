@@ -6,7 +6,28 @@ import os
 import base64
 import streamlit as st
 from supabase import create_client, Client
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+# 台灣時區設定 (+08:00)
+TAIWAN_TZ = timezone(timedelta(hours=8))
+
+def to_tz_aware_iso(dt: datetime) -> str:
+    """將 datetime 轉換為帶有台灣時區的 ISO 字串（以便存入資料庫）"""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TAIWAN_TZ)
+    return dt.isoformat()
+
+def to_local_naive(dt_str: str) -> datetime:
+    """將資料庫讀出的 ISO 字串轉換為台灣本地的 naive datetime"""
+    if not dt_str:
+        return datetime.now()
+    if dt_str.endswith("Z"):
+        dt_str = dt_str[:-1] + "+00:00"
+    dt = datetime.fromisoformat(dt_str)
+    if dt.tzinfo is not None:
+        # 轉換為台灣時區，然後去掉時區資訊變回 naive datetime
+        dt = dt.astimezone(TAIWAN_TZ).replace(tzinfo=None)
+    return dt
 
 
 def _get_supabase_client() -> Client:
@@ -129,8 +150,8 @@ def db_save_group(group: dict) -> bool:
             "vendor_name": group.get("vendor_name", ""),
             "category": group.get("category", "餐點"),
             "description": group.get("description", ""),
-            "deadline": group["deadline"].isoformat() if isinstance(group["deadline"], datetime) else group["deadline"],
-            "created_at": group["created_at"].isoformat() if isinstance(group["created_at"], datetime) else group["created_at"],
+            "deadline": to_tz_aware_iso(group["deadline"]) if isinstance(group["deadline"], datetime) else group["deadline"],
+            "created_at": to_tz_aware_iso(group["created_at"]) if isinstance(group["created_at"], datetime) else group["created_at"],
             "menu": menu_records,
             "menu_image_b64": image_b64,
         }
@@ -172,8 +193,8 @@ def db_load_groups() -> list:
                 "vendor_name": row.get("vendor_name", ""),
                 "category": row.get("category", "餐點"),
                 "description": row.get("description", ""),
-                "deadline": datetime.fromisoformat(row["deadline"]) if row.get("deadline") else datetime.now(),
-                "created_at": datetime.fromisoformat(row["created_at"]) if row.get("created_at") else datetime.now(),
+                "deadline": to_local_naive(row.get("deadline")),
+                "created_at": to_local_naive(row.get("created_at")),
                 "menu": row.get("menu", []),  # 會在 menu.py 中由 sanitize_menu_dataframe 處理
                 "orders": orders,
                 "menu_image_bytes": image_bytes,
