@@ -9,7 +9,13 @@ from db import (
     db_save_vendor, db_load_vendors, db_delete_vendor,
     db_save_group, db_load_groups,
     db_save_order,
+    TAIWAN_TZ,
 )
+
+
+def now_tw() -> datetime:
+    """取得台灣本地時間（無時區標記的 naive datetime）"""
+    return datetime.now(TAIWAN_TZ).replace(tzinfo=None)
 
 # 設定頁面配置
 st.set_page_config(page_title="多功能團購系統", layout="wide", page_icon="🍱")
@@ -23,10 +29,7 @@ def create_empty_menu_df():
 
 
 def is_group_active(group):
-    deadline = group['deadline']
-    if deadline.tzinfo is not None:
-        return deadline > datetime.now(deadline.tzinfo)
-    return deadline > datetime.now()
+    return group['deadline'] > now_tw()
 
 
 def normalize_text(value):
@@ -447,9 +450,9 @@ elif page == "我要開團 (團主)":
     st.subheader("設定收單時間")
     c1, c2 = st.columns(2)
     with c1:
-        d = st.date_input("收單日期", datetime.now())
+        d = st.date_input("收單日期", now_tw())
     with c2:
-        now = datetime.now()
+        now = now_tw()
         default_time = (now.replace(second=0, microsecond=0) + pd.Timedelta(hours=1)).strftime('%H:%M')
         t_str = st.text_input("收單時間 (HH:MM)", value=default_time, help="請輸入24小時制時間，例如 14:30")
         time_valid = re.match(r"^(?:[01]?\d|2[0-3]):[0-5]\d$", t_str)
@@ -502,7 +505,7 @@ elif page == "我要開團 (團主)":
             st.error("❌ 菜單為空!請輸入至少一個品項。")
         elif not time_valid:
             st.error("❌ 請先修正收單時間格式！")
-        elif deadline_dt <= datetime.now():
+        elif deadline_dt <= now_tw():
             st.error(f"⛔ 收單時間 ({deadline_dt.strftime('%Y-%m-%d %H:%M')}) 不能早於目前時間!")
         else:
             image_bytes = uploaded_image.getvalue() if uploaded_image else st.session_state.get('_grp_menu_image_bytes')
@@ -510,7 +513,7 @@ elif page == "我要開團 (團主)":
                 "id": str(uuid.uuid4()), "vendor_name": normalized_vendor_name,
                 "category": category, "description": normalize_text(description),
                 "deadline": deadline_dt, "menu": final_menu_df,
-                "orders": [], "created_at": datetime.now(),
+                "orders": [], "created_at": now_tw(),
                 "menu_image_bytes": image_bytes,
             }
             st.session_state.groups.append(new_group)
@@ -586,9 +589,7 @@ elif page == "我要點餐 (團員)":
                     image_buffer = io.BytesIO(group['menu_image_bytes'])
                     st.image(image_buffer, caption=f"{group['vendor_name']} 原始菜單", use_container_width=True)
 
-            deadline = group['deadline']
-            now = datetime.now(deadline.tzinfo) if deadline.tzinfo is not None else datetime.now()
-            time_left = deadline - now
+            time_left = group['deadline'] - now_tw()
             if time_left.total_seconds() <= 0:
                 st.error("⛔ 這團已經截止收單囉！")
             else:
@@ -658,7 +659,7 @@ elif page == "我要點餐 (團員)":
                                     "數量": quantity_value,
                                     "總價": item_price * quantity_value,
                                     "備註": normalize_text(final_note),
-                                    "下單時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    "下單時間": now_tw().strftime("%Y-%m-%d %H:%M:%S")
                                 }
 
                                 group['orders'].append(order_entry)
